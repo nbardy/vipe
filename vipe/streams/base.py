@@ -16,21 +16,18 @@
 import copy
 import importlib
 import logging
-
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Iterable, Iterator, Protocol
 
 import numpy as np
 import torch
-
 from omegaconf import DictConfig
 from torch.utils.data import IterableDataset
 
 from vipe.ext.lietorch import SE3
 from vipe.utils.cameras import CameraType
 from vipe.utils.logging import pbar
-
 
 logger = logging.getLogger(__name__)
 
@@ -463,7 +460,7 @@ class ProcessedVideoStream(VideoStream):
         super().__init__()
         self.stream = stream
         self.processors = processors
-        self.n_passes_required = max(processor.n_passes_required for processor in processors)
+        self.n_passes_required = max(processor.n_passes_required for processor in processors) if processors else 1
 
     def frame_size(self) -> tuple[int, int]:
         frame_size = self.stream.frame_size()
