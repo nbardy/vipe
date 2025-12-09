@@ -15,7 +15,6 @@
 
 
 import logging
-
 from typing import Iterator
 
 import numpy as np
@@ -28,12 +27,12 @@ from vipe.priors.depth.videodepthanything import VideoDepthAnythingDepthModel
 from vipe.priors.geocalib import GeoCalib
 from vipe.priors.track_anything import TrackAnythingPipeline
 from vipe.slam.interface import SLAMOutput
-from vipe.streams.base import CachedVideoStream, FrameAttribute, StreamProcessor, VideoFrame, VideoStream
+from vipe.streams.base import (CachedVideoStream, FrameAttribute,
+                               StreamProcessor, VideoFrame, VideoStream)
 from vipe.utils.cameras import CameraType
 from vipe.utils.logging import pbar
 from vipe.utils.misc import unpack_optional
 from vipe.utils.morph import erode
-
 
 logger = logging.getLogger(__name__)
 
@@ -318,9 +317,9 @@ class MultiviewDepthProcessor(StreamProcessor):
         self,
         slam_output: SLAMOutput,
         model: str = "mvd_dav3",
-        window_size: int = 10,
-        overlap_size: int = 5,
-        secondary_keyframe: bool = True,
+        window_size: int = 10,                  # Practically this should be as large as possible if memory permits.
+        overlap_size: int = 3,
+        secondary_keyframe: bool = False,       # This is found to cause jittering for some scenes due to abrupt context changes.
     ):
         super().__init__()
         self.slam_output = slam_output
@@ -397,7 +396,11 @@ class MultiviewDepthProcessor(StreamProcessor):
                 ]
 
                 sw_images, sw_exts, sw_ints = zip(*[frame.dav3_conditions() for frame in current_sliding_window])
-                kf_images, kf_exts, kf_ints = zip(*[self.keyframes_data[t].dav3_conditions() for t in sw_keyframe_inds])
+
+                if len(sw_keyframe_inds) > 0:
+                    kf_images, kf_exts, kf_ints = zip(*[self.keyframes_data[t].dav3_conditions() for t in sw_keyframe_inds])
+                else:
+                    kf_images, kf_exts, kf_ints = tuple(), tuple(), tuple()
 
                 # Perform inference
                 dav3_inference_result = self.dav3_api.inference(
