@@ -319,4 +319,5 @@ class SLAMSystem:
             intrinsics=original_intrinsics,
             rig=SE3(self.buffer.rig.clone()),
             slam_map=slam_map,
+            sparse_tracks=self.sparse_tracks,
         )

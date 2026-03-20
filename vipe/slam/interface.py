@@ -183,6 +183,8 @@ class SLAMMap:
         return target_depth
 
 
+from vipe.slam.components.sparse_tracks import SparseTracks
+
 @dataclass(kw_only=True)
 class SLAMOutput:
     trajectory: SE3  # (N,)
@@ -190,6 +192,7 @@ class SLAMOutput:
 
     rig: SE3 | None = None  # (V,)
     slam_map: SLAMMap | None = None
+    sparse_tracks: SparseTracks | None = None
 
     # Residual of BA (unit is pixel/diagonal) -- average num of pixels/diagonal between predicted and observed flows
     # Should be of range [0, 1]

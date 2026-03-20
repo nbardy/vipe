@@ -13,36 +13,41 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+
+import logging
+
 from pathlib import Path
 
 import click
 import hydra
 
-from vipe import get_config_path, make_pipeline
+from vipe import get_config_path
+from vipe.pipeline import make_pipeline
 from vipe.streams.base import ProcessedVideoStream
-from vipe.streams.raw_mp4_stream import RawMp4Stream
 from vipe.streams.frame_dir_stream import FrameDirStream
-from vipe.utils.logging import configure_logging
+from vipe.streams.raw_mp4_stream import RawMp4Stream
 from vipe.utils.viser import run_viser
 
 
+def configure_logging():
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+    return logging.getLogger("vipe")
+
+
 @click.command()
-@click.argument("video", type=click.Path(exists=True, path_type=Path), required=False)
-@click.option(
-    "--image-dir",
-    type=click.Path(exists=True, path_type=Path),
-    help="Directory containing image frames",
-)
+@click.option("--video", "-v", type=click.Path(exists=True, path_type=Path), help="Path to the video file")
+@click.option("--image-dir", "-i", type=click.Path(exists=True, path_type=Path), help="Path to the directory of images")
 @click.option(
     "--output",
     "-o",
     type=click.Path(path_type=Path),
-    help="Output directory (default: current directory)",
     default=Path.cwd() / "vipe_results",
+    help="Output directory (default: current directory)",
 )
-@click.option("--pipeline", "-p", default="default", help="Pipeline configuration to use (default: 'default')")
-@click.option("--visualize", "-v", is_flag=True, help="Enable visualization of intermediate results")
-def infer(video: Path, image_dir: Path, output: Path, pipeline: str, visualize: bool):
+@click.option("--pipeline", "-p", default="default", help="Pipeline configuration to use")
+@click.option("--visualize", "-vis", is_flag=True, help="Enable visualization of intermediate results")
+@click.argument("overrides", nargs=-1)
+def infer(video: Path, image_dir: Path, output: Path, pipeline: str, visualize: bool, overrides: tuple[str]):
     """Run inference on a video file or directory of images."""
 
     logger = configure_logging()
@@ -56,16 +61,19 @@ def infer(video: Path, image_dir: Path, output: Path, pipeline: str, visualize: 
         click.echo("Error: Cannot provide both video file and --image-dir", err=True)
         raise click.Abort()
 
-    overrides = [f"pipeline={pipeline}", f"pipeline.output.path={output}", "pipeline.output.save_artifacts=true"]
+    hydra_overrides = [f"pipeline={pipeline}", f"pipeline.output.path={output}", "pipeline.output.save_artifacts=true"]
     if visualize:
-        overrides.append("pipeline.output.save_viz=true")
-        overrides.append("pipeline.slam.visualize=true")
+        hydra_overrides.append("pipeline.output.save_viz=true")
+        hydra_overrides.append("pipeline.slam.visualize=true")
     else:
-        overrides.append("pipeline.output.save_viz=false")
+        hydra_overrides.append("pipeline.output.save_viz=false")
+
+    # Add user overrides
+    hydra_overrides.extend(list(overrides))
 
     # Set up stream configuration based on input type
     if image_dir:
-        overrides.extend([
+        hydra_overrides.extend([
             "streams=frame_dir_stream",
             f"streams.base_path={image_dir}"
         ])
@@ -76,7 +84,7 @@ def infer(video: Path, image_dir: Path, output: Path, pipeline: str, visualize: 
         input_desc = f"video {video}"
 
     with hydra.initialize_config_dir(config_dir=str(get_config_path()), version_base=None):
-        args = hydra.compose("default", overrides=overrides)
+        args = hydra.compose("default", overrides=hydra_overrides)
 
     logger.info(f"Processing {input_desc}...")
     vipe_pipeline = make_pipeline(args.pipeline)

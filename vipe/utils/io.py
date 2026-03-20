@@ -99,6 +99,10 @@ class ArtifactPath:
         return self.base_path / "vipe" / f"{self.artifact_name}_slam_map.pt"
 
     @property
+    def sparse_tracks_path(self) -> Path:
+        return self.base_path / "vipe" / f"{self.artifact_name}_sparse_tracks.pkl"
+
+    @property
     def essential_paths(self) -> list[Path]:
         return [
             self.rgb_path,
@@ -110,6 +114,7 @@ class ArtifactPath:
             self.mask_phrase_path,
             self.meta_info_path,
             self.meta_vis_path,
+            self.sparse_tracks_path,
         ]
 
     @property
@@ -339,6 +344,36 @@ def read_instance_phrases(instance_phrase_path: Path) -> dict[int, str]:
     return instance_phrases
 
 
+def save_flow_artifacts(out_path: ArtifactPath, cached_final_stream: VideoStream) -> None:
+    # Save optical flow as zipped npy files.
+    flow_list = [
+        (frame_idx, frame_data.information.get("flow"))
+        for frame_idx, frame_data in enumerate(cached_final_stream)
+        if isinstance(frame_data.information, dict) and "flow" in frame_data.information
+    ]
+    if len(flow_list) > 0:
+        out_path.flow_path.parent.mkdir(exist_ok=True, parents=True)
+        with zipfile.ZipFile(out_path.flow_path, "w", zipfile.ZIP_DEFLATED) as z:
+            for frame_idx, flow in flow_list:
+                if flow is not None:
+                    # flow is (H, W, 2)
+                    with tempfile.NamedTemporaryFile(suffix=".npy") as f:
+                        np.save(f.name, flow.cpu().numpy().astype(np.float16))
+                        z.write(f.name, f"{frame_idx:05d}.npy")
+
+
+def read_flow_artifacts(zip_file_path: Path) -> Iterator[tuple[int, torch.Tensor]]:
+    """
+    Read optical flow from zipped npy files.
+    """
+    with zipfile.ZipFile(zip_file_path, "r") as z:
+        for file_name in sorted(z.namelist()):
+            frame_idx = int(file_name.split(".")[0])
+            with z.open(file_name) as f:
+                flow_data = np.load(f)
+                yield frame_idx, torch.from_numpy(flow_data).float()
+
+
 def save_artifacts(out_path: ArtifactPath, cached_final_stream: VideoStream) -> None:
     """
     Save each attribute independently.
@@ -355,6 +390,9 @@ def save_artifacts(out_path: ArtifactPath, cached_final_stream: VideoStream) -> 
 
     # Save metric depth as zipped exr files.
     save_depth_artifacts(out_path, cached_final_stream)
+
+    # Save optical flow as zipped npy files.
+    save_flow_artifacts(out_path, cached_final_stream)
 
     # Save Instance mask as zipped PNG files.
     instance_list = [

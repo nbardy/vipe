@@ -16,21 +16,22 @@
 
 import logging
 import pickle
+import torch
 
 from pathlib import Path
-
-import torch
+from typing import Sequence
 
 from omegaconf import DictConfig
 
-from vipe.slam.system import SLAMOutput, SLAMSystem
+from vipe.slam.interface import SLAMOutput
+from vipe.slam.system import SLAMSystem
 from vipe.streams.base import (
     AssignAttributesProcessor,
-    FrameAttribute,
-    MultiviewVideoList,
     ProcessedVideoStream,
-    StreamProcessor,
     VideoStream,
+    MultiviewVideoList,
+    FrameAttribute,
+    StreamProcessor
 )
 from vipe.utils import io
 from vipe.utils.cameras import CameraType
@@ -133,11 +134,75 @@ class DefaultAnnotationPipeline(Pipeline):
         ]
 
         # Dumping artifacts for all views in the streams
-        for output_stream, artifact_path in zip(output_streams, artifact_paths):
+        for view_idx, (output_stream, artifact_path) in enumerate(zip(output_streams, artifact_paths)):
             artifact_path.meta_info_path.parent.mkdir(exist_ok=True, parents=True)
             if self.out_cfg.save_artifacts:
                 logger.info(f"Saving artifacts to {artifact_path}")
                 io.save_artifacts(artifact_path, output_stream)
+                
+                # Save sparse tracks if available
+                if slam_output.sparse_tracks is not None:
+                    logger.info(f"Saving sparse tracks and flowet ensemble to {artifact_path.sparse_tracks_path}")
+                    with artifact_path.sparse_tracks_path.open("wb") as f:
+                        pickle.dump(slam_output.sparse_tracks.observations, f)
+                    
+                    # Compute Flowet Ensemble
+                    try:
+                        from training.flowet_ensemble_engine import FlowetEnsembleEngine
+                        from training.init_utils import unproject_tracks_to_3d
+                        
+                        T = len(output_stream)
+                        depths_list = []
+                        for i, f in enumerate(output_stream):
+                            if f.metric_depth is None:
+                                H, W = output_stream[0].rgb.shape[0], output_stream[0].rgb.shape[1]
+                                depths_list.append(torch.zeros((H, W), device=f.pose.device()))
+                            else:
+                                depths_list.append(f.metric_depth)
+                        
+                        depths = torch.stack(depths_list).unsqueeze(1)
+                        poses = torch.stack([f.pose.matrix() for f in output_stream])
+                        
+                        K_list = []
+                        for f in output_stream:
+                            fx, fy, cx, cy = f.intrinsics[0], f.intrinsics[1], f.intrinsics[2], f.intrinsics[3]
+                            K_list.append(torch.tensor([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], device=depths.device, dtype=torch.float32))
+                        intrinsics = torch.stack(K_list)
+                        
+                        X_tracks = unproject_tracks_to_3d(slam_output.sparse_tracks.observations[view_idx], depths, poses, intrinsics)
+                        
+                        if X_tracks.shape[0] == 0:
+                            logger.info("Sparse tracks empty, falling back to dense flow tracks...")
+                            H, W = depths.shape[2], depths.shape[3]
+                            step = 32
+                            u0, v0 = torch.meshgrid(torch.arange(0, W, step, device=depths.device), 
+                                                   torch.arange(0, H, step, device=depths.device), indexing='xy')
+                            u_curr, v_curr = u0.flatten(), v0.flatten()
+                            N_dense = u_curr.shape[0]
+                            X_tracks = torch.full((N_dense, T, 3), float('nan'), device=depths.device)
+                            for t in range(T):
+                                z = depths[t, 0, v_curr.long(), u_curr.long()]
+                                valid = (z > 0) & (z < 1000.0)
+                                if not valid.any(): continue
+                                K = intrinsics[t]
+                                fx, fy, cx, cy = K[0, 0].item(), K[1, 1].item(), K[0, 2].item(), K[1, 2].item()
+                                p_cam = torch.stack([(u_curr[valid]-cx)/fx*z[valid], (v_curr[valid]-cy)/fy*z[valid], z[valid]], dim=1)
+                                c2w = poses[t]
+                                X_tracks[valid, t] = torch.matmul(p_cam, c2w[:3, :3].T) + c2w[:3, 3]
+
+                        logger.info(f"Flowet Ensemble fitting {X_tracks.shape[0]} particles over {T} frames")
+                        engine = FlowetEnsembleEngine(T=T, device=depths.device)
+                        ensemble = engine.process_batch(X_tracks)
+                        
+                        ensemble_path = artifact_path.base_path / "vipe" / f"{artifact_path.artifact_name}_flowet_ensemble.pt"
+                        torch.save(ensemble, ensemble_path)
+                        logger.info(f"Saved Flowet Ensemble to {ensemble_path}")
+                        
+                    except Exception as e:
+                        logger.error(f"Flowet Ensemble computation failed: {e}")
+                        import traceback
+                        logger.error(traceback.format_exc())
+                
                 with artifact_path.meta_info_path.open("wb") as f:
                     pickle.dump({"ba_residual": slam_output.ba_residual}, f)
 
