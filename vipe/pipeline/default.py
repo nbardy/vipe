@@ -173,17 +173,42 @@ class DefaultAnnotationPipeline(Pipeline):
                         X_tracks = unproject_tracks_to_3d(slam_output.sparse_tracks.observations[view_idx], depths, poses, intrinsics)
                         
                         if X_tracks.shape[0] == 0:
-                            logger.info("Sparse tracks empty, falling back to dense flow tracks...")
+                            # Dense calibrated unprojection: use a finer grid than the
+                            # old step=32 dummy fallback, and apply SLAM scale calibration
+                            # when available so points land in SLAM's consistent coordinate
+                            # system. The old dummy grid tracked the same pixel every frame
+                            # which fits camera motion noise (2-9m RMSE), not physical motion.
+                            # With calibration, static points should produce ~0 polynomial
+                            # coefficients (degree-0 = constant position).
+                            slam_map = slam_output.slam_map if slam_output.slam_map is not None else None
+                            dense_step = getattr(self.out_cfg, "dense_step", 8)
+                            logger.info(f"Sparse tracks empty, using dense grid (step={dense_step}, calibrate={slam_map is not None})")
                             H, W = depths.shape[2], depths.shape[3]
-                            step = 32
-                            u0, v0 = torch.meshgrid(torch.arange(0, W, step, device=depths.device), 
-                                                   torch.arange(0, H, step, device=depths.device), indexing='xy')
+                            u0, v0 = torch.meshgrid(torch.arange(0, W, dense_step, device=depths.device),
+                                                   torch.arange(0, H, dense_step, device=depths.device), indexing='xy')
                             u_curr, v_curr = u0.flatten(), v0.flatten()
                             N_dense = u_curr.shape[0]
                             X_tracks = torch.full((N_dense, T, 3), float('nan'), device=depths.device)
                             for t in range(T):
-                                z = depths[t, 0, v_curr.long(), u_curr.long()]
-                                valid = (z > 0) & (z < 1000.0)
+                                z = depths[t, 0, v_curr.long(), u_curr.long()].clone()
+                                # SLAM scale calibration: project SLAM points into this frame,
+                                # compute median ratio, and scale the depth to match SLAM coords.
+                                if slam_map is not None:
+                                    slam_depth = slam_map.project_map(
+                                        t, 0, (H, W),
+                                        output_stream[t].intrinsics,
+                                        slam_output.get_view_trajectory(view_idx)[t],
+                                        output_stream[t].camera_type,
+                                        infill=False,
+                                    )
+                                    sv = slam_depth > 0
+                                    if sv.any():
+                                        est = z.view(H, W)[sv]
+                                        ev = est > 0.01
+                                        if ev.any():
+                                            ratio = torch.median(slam_depth[sv][ev] / est[ev])
+                                            z = z * ratio
+                                valid = (z > 0) & (z < 1e6)
                                 if not valid.any(): continue
                                 K = intrinsics[t]
                                 fx, fy, cx, cy = K[0, 0].item(), K[1, 1].item(), K[0, 2].item(), K[1, 2].item()
