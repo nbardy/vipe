@@ -37,6 +37,13 @@ class SLAMMap:
     # (Q, 2) keyframe graphs (index into dense_disp_frame_inds)
     backend_graph: torch.Tensor | None = None
 
+    # Raw unflattened dense grids
+    raw_disps: torch.Tensor | None = None
+    raw_images: torch.Tensor | None = None
+    raw_masks: torch.Tensor | None = None
+    raw_poses: torch.Tensor | None = None
+    raw_intrinsics: torch.Tensor | None = None
+
     def scale(self, factor: float):
         self.dense_disp_xyz *= factor
 
@@ -51,6 +58,11 @@ class SLAMMap:
                 "dense_disp_rgb": self.dense_disp_rgb.cpu(),
                 "dense_disp_packinfo": self.dense_disp_packinfo.cpu(),
                 "dense_disp_frame_inds": self.dense_disp_frame_inds,
+                "raw_disps": self.raw_disps.cpu() if self.raw_disps is not None else None,
+                "raw_images": self.raw_images.cpu() if self.raw_images is not None else None,
+                "raw_masks": self.raw_masks.cpu() if self.raw_masks is not None else None,
+                "raw_poses": self.raw_poses.cpu() if self.raw_poses is not None else None,
+                "raw_intrinsics": self.raw_intrinsics.cpu() if self.raw_intrinsics is not None else None,
                 "device": map_device,
             },
             path,
@@ -69,6 +81,11 @@ class SLAMMap:
             dense_disp_rgb=data["dense_disp_rgb"].to(device),
             dense_disp_packinfo=data["dense_disp_packinfo"].to(device),
             dense_disp_frame_inds=data["dense_disp_frame_inds"],
+            raw_disps=data.get("raw_disps").to(device) if data.get("raw_disps") is not None else None,
+            raw_images=data.get("raw_images").to(device) if data.get("raw_images") is not None else None,
+            raw_masks=data.get("raw_masks").to(device) if data.get("raw_masks") is not None else None,
+            raw_poses=data.get("raw_poses").to(device) if data.get("raw_poses") is not None else None,
+            raw_intrinsics=data.get("raw_intrinsics").to(device) if data.get("raw_intrinsics") is not None else None,
         )
 
     @staticmethod

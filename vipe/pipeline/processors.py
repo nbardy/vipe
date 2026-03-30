@@ -154,6 +154,7 @@ class AdaptiveDepthProcessor(StreamProcessor):
         view_idx: int = 0,
         model: str = "adaptive_unidepth-l_svda",
         share_depth_model: bool = False,
+        slam_calibrate: bool = False,
     ):
         super().__init__()
         self.slam_output = slam_output
@@ -162,6 +163,7 @@ class AdaptiveDepthProcessor(StreamProcessor):
         assert not share_depth_model, "Adaptive depth processor does not support shared depth model"
         self.require_cache = True
         self.model = model
+        self.slam_calibrate = slam_calibrate
 
         try:
             prefix, metric_model, video_model = model.split("_")
@@ -297,6 +299,30 @@ class AdaptiveDepthProcessor(StreamProcessor):
 
             else:
                 frame.metric_depth = prompt_result
+
+            # SLAM-anchored scale calibration: forces output depth into SLAM's
+            # coordinate system by comparing projected SLAM depth against the
+            # estimated metric depth. The upstream alignment (inv-depth affine +
+            # momentum smoothing) leaves 0.78x–11x residual drift because it
+            # operates in inverse-depth space with a slowly-adapting cache.
+            # This final median-ratio correction in linear depth space fixes it.
+            if self.slam_calibrate and self.slam_output.slam_map is not None:
+                slam_depth = self.slam_output.slam_map.project_map(
+                    frame_idx,
+                    0,
+                    frame.size(),
+                    unpack_optional(frame.intrinsics),
+                    self.infill_target_pose[frame_idx],
+                    unpack_optional(frame.camera_type),
+                    infill=False,
+                )
+                slam_valid = slam_depth > 0
+                if slam_valid.any():
+                    est_at_slam = frame.metric_depth[slam_valid]
+                    est_valid = est_at_slam > 0.01
+                    if est_valid.any():
+                        ratio = torch.median(slam_depth[slam_valid][est_valid] / est_at_slam[est_valid])
+                        frame.metric_depth = frame.metric_depth * ratio
 
             yield frame
 

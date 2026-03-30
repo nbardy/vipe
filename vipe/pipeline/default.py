@@ -96,7 +96,8 @@ class DefaultAnnotationPipeline(Pipeline):
             if depth_align_model.startswith("mvd_"):
                 post_processors.append(MultiviewDepthProcessor(slam_output, model=depth_align_model))
             else:
-                post_processors.append(AdaptiveDepthProcessor(slam_output, view_idx, depth_align_model))
+                slam_calibrate = getattr(self.post_cfg, "slam_calibrate", False)
+                post_processors.append(AdaptiveDepthProcessor(slam_output, view_idx, depth_align_model, slam_calibrate=slam_calibrate))
         return ProcessedVideoStream(video_stream, post_processors)
 
     def run(self, video_data: VideoStream | MultiviewVideoList) -> AnnotationPipelineOutput:

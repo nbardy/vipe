@@ -637,12 +637,18 @@ class GraphBuffer:
             pts_list.append(pts)
             mask_list.append(masks)
 
-        return SLAMMap.from_masked_dense_disp(
+        slam_map = SLAMMap.from_masked_dense_disp(
             torch.stack(pts_list, dim=1),
             images,
             torch.stack(mask_list, dim=1),
             self.tstamp[t_range],
         )
+        slam_map.raw_disps = self.disps[t_range]
+        slam_map.raw_images = images
+        slam_map.raw_masks = torch.stack(mask_list, dim=1)
+        slam_map.raw_poses = self.poses[t_range]
+        slam_map.raw_intrinsics = self.intrinsics
+        return slam_map
 
     def log_tracks(self):
         if not self.sparse_tracks.enabled:
