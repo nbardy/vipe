@@ -36,7 +36,7 @@ class FrameDirStream(VideoStream):
         self._name = name if name is not None else path.name
 
         # Find all image files in the directory
-        image_extensions = ['.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif']
+        image_extensions = ['.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif', '.webp']
         self.frame_files = []
         for ext in image_extensions:
             self.frame_files.extend(sorted(path.glob(f'*{ext}')))

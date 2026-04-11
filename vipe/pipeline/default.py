@@ -97,7 +97,8 @@ class DefaultAnnotationPipeline(Pipeline):
                 post_processors.append(MultiviewDepthProcessor(slam_output, model=depth_align_model))
             else:
                 slam_calibrate = getattr(self.post_cfg, "slam_calibrate", False)
-                post_processors.append(AdaptiveDepthProcessor(slam_output, view_idx, depth_align_model, slam_calibrate=slam_calibrate))
+                global_smooth_scale = getattr(self.post_cfg, "global_smooth_scale", False)
+                post_processors.append(AdaptiveDepthProcessor(slam_output, view_idx, depth_align_model, slam_calibrate=slam_calibrate, global_smooth_scale=global_smooth_scale))
         return ProcessedVideoStream(video_stream, post_processors)
 
     def run(self, video_data: VideoStream | MultiviewVideoList) -> AnnotationPipelineOutput:
@@ -129,11 +130,71 @@ class DefaultAnnotationPipeline(Pipeline):
             annotate_output.payload = slam_output
             return annotate_output
 
+        global_smooth_scale = getattr(self.post_cfg, "global_smooth_scale", False)
+        slam_calibrate = getattr(self.post_cfg, "slam_calibrate", False)
+
+        def _add_post_processors_with_scale(view_idx, slam_stream, slam_output):
+            pp = self._add_post_processors(view_idx, slam_stream, slam_output)
+            if pp.processors:
+                for p in pp.processors:
+                    if hasattr(p, "slam_calibrate"):
+                        p.slam_calibrate = slam_calibrate
+                    if hasattr(p, "global_smooth_scale"):
+                        p.global_smooth_scale = global_smooth_scale
+            return pp
+
         output_streams = [
-            self._add_post_processors(view_idx, slam_stream, slam_output).cache("depth", online=True)
+            _add_post_processors_with_scale(view_idx, slam_stream, slam_output).cache("depth", online=not global_smooth_scale)
             for view_idx, slam_stream in enumerate(slam_streams)
         ]
 
+        if global_smooth_scale:
+            print("[DEBUG] Applying global smooth scale", flush=True)
+            # Apply global median smoothing to slam_calibrate ratios if present
+            for view_idx, output_stream in enumerate(output_streams):
+                print(f"[DEBUG] Forcing stream evaluation...", flush=True)
+                list(output_stream) # Evaluate the stream to populate .data
+                print(f"[DEBUG] Processing view_idx={view_idx}, len(data)={len(output_stream.data)}", flush=True)
+                ratios = []
+                for f in output_stream.data:
+                    r = None
+                    if f.information and f.information.startswith("ratio="):
+                        try:
+                            r = float(f.information.split("=")[1])
+                        except ValueError:
+                            pass
+                    ratios.append(r)
+                    
+                if any(r is not None for r in ratios):
+                    print("[DEBUG] Found valid ratios, applying medfilt", flush=True)
+                    import numpy as np
+                    import scipy.signal
+                    
+                    valid_indices = [i for i, r in enumerate(ratios) if r is not None]
+                    if valid_indices:
+                        r_arr = np.zeros(len(ratios))
+                        for i in range(len(ratios)):
+                            if ratios[i] is not None:
+                                r_arr[i] = ratios[i]
+                            else:
+                                nearest = min(valid_indices, key=lambda idx: abs(idx - i))
+                                r_arr[i] = ratios[nearest]
+                        
+                        window = getattr(self.post_cfg, "smooth_scale_window", 15)
+                        window = min(window, len(r_arr))
+                        if window % 2 == 0: window -= 1
+                        if window >= 3:
+                            smoothed = scipy.signal.medfilt(r_arr, window)
+                        else:
+                            smoothed = r_arr
+                            
+                        print("[DEBUG] Applying smoothed scale to metric_depth", flush=True)
+                        for i, f in enumerate(output_stream.data):
+                            if f.metric_depth is not None:
+                                f.metric_depth = f.metric_depth * float(smoothed[i])
+            print("[DEBUG] Finished global smooth scale", flush=True)
+
+        print("[DEBUG] Calling io.save_artifacts", flush=True)
         # Dumping artifacts for all views in the streams
         for view_idx, (output_stream, artifact_path) in enumerate(zip(output_streams, artifact_paths)):
             artifact_path.meta_info_path.parent.mkdir(exist_ok=True, parents=True)
@@ -191,23 +252,6 @@ class DefaultAnnotationPipeline(Pipeline):
                             X_tracks = torch.full((N_dense, T, 3), float('nan'), device=depths.device)
                             for t in range(T):
                                 z = depths[t, 0, v_curr.long(), u_curr.long()].clone()
-                                # SLAM scale calibration: project SLAM points into this frame,
-                                # compute median ratio, and scale the depth to match SLAM coords.
-                                if slam_map is not None:
-                                    slam_depth = slam_map.project_map(
-                                        t, 0, (H, W),
-                                        output_stream[t].intrinsics,
-                                        slam_output.get_view_trajectory(view_idx)[t],
-                                        output_stream[t].camera_type,
-                                        infill=False,
-                                    )
-                                    sv = slam_depth > 0
-                                    if sv.any():
-                                        est = z.view(H, W)[sv]
-                                        ev = est > 0.01
-                                        if ev.any():
-                                            ratio = torch.median(slam_depth[sv][ev] / est[ev])
-                                            z = z * ratio
                                 valid = (z > 0) & (z < 1e6)
                                 if not valid.any(): continue
                                 K = intrinsics[t]

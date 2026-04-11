@@ -155,6 +155,7 @@ class AdaptiveDepthProcessor(StreamProcessor):
         model: str = "adaptive_unidepth-l_svda",
         share_depth_model: bool = False,
         slam_calibrate: bool = False,
+        global_smooth_scale: bool = False,
     ):
         super().__init__()
         self.slam_output = slam_output
@@ -164,6 +165,7 @@ class AdaptiveDepthProcessor(StreamProcessor):
         self.require_cache = True
         self.model = model
         self.slam_calibrate = slam_calibrate
+        self.global_smooth_scale = global_smooth_scale
 
         try:
             prefix, metric_model, video_model = model.split("_")
@@ -209,6 +211,7 @@ class AdaptiveDepthProcessor(StreamProcessor):
 
     def update_iterator(self, previous_iterator: Iterator[VideoFrame], pass_idx: int) -> Iterator[VideoFrame]:
         # Determine the percentage score of the SLAM map.
+        import scipy.signal
 
         self.cache_scale_bias = None
         min_uv_score: float = 1.0
@@ -219,7 +222,11 @@ class AdaptiveDepthProcessor(StreamProcessor):
             video_depth_result = None
             data_iterator = previous_iterator
 
-        for frame_idx, frame in pbar(enumerate(data_iterator), desc="Aligning depth"):
+        buffered_frames = []
+        raw_scales = []
+        raw_biases = []
+
+        for frame_idx, frame in pbar(enumerate(data_iterator), desc="Aligning depth (Pass 1)"):
             # Convert back to GPU if not already.
             frame = frame.cuda()
 
@@ -284,45 +291,43 @@ class AdaptiveDepthProcessor(StreamProcessor):
                         align_mask,
                     )
                 except RuntimeError:
-                    scale, bias = self.cache_scale_bias
+                    scale = raw_scales[-1] if raw_scales else 1.0
+                    bias = raw_biases[-1] if raw_biases else 0.0
 
-                # momentum update
-                if self.cache_scale_bias is None:
-                    self.cache_scale_bias = (scale, bias)
-                scale = self.cache_scale_bias[0] * self.update_momentum + scale * (1 - self.update_momentum)
-                bias = self.cache_scale_bias[1] * self.update_momentum + bias * (1 - self.update_momentum)
-                self.cache_scale_bias = (scale, bias)
+                raw_scales.append(scale)
+                raw_biases.append(bias)
+                buffered_frames.append((frame_idx, frame, video_depth_inv_depth, prompt_result))
+            else:
+                frame.metric_depth = prompt_result
+                raw_scales.append(1.0)
+                raw_biases.append(0.0)
+                buffered_frames.append((frame_idx, frame, None, prompt_result))
+
+        # Temporal smoothing pass
+        if len(raw_scales) > 0:
+            kernel_size = min(11, len(raw_scales))
+            if kernel_size % 2 == 0:
+                kernel_size -= 1
+            if kernel_size >= 3:
+                smoothed_scales = scipy.signal.medfilt(raw_scales, kernel_size=kernel_size)
+                smoothed_biases = scipy.signal.medfilt(raw_biases, kernel_size=kernel_size)
+            else:
+                smoothed_scales = raw_scales
+                smoothed_biases = raw_biases
+        else:
+            smoothed_scales = raw_scales
+            smoothed_biases = raw_biases
+
+        for i, (frame_idx, frame, video_depth_inv_depth, prompt_result) in pbar(enumerate(buffered_frames), desc="Aligning depth (Pass 2)"):
+            if video_depth_inv_depth is not None:
+                scale = float(smoothed_scales[i])
+                bias = float(smoothed_biases[i])
 
                 video_inv_depth = video_depth_inv_depth * scale + bias
                 video_inv_depth[video_inv_depth < 1e-3] = 1e-3
                 frame.metric_depth = video_inv_depth.reciprocal()
-
             else:
                 frame.metric_depth = prompt_result
-
-            # SLAM-anchored scale calibration: forces output depth into SLAM's
-            # coordinate system by comparing projected SLAM depth against the
-            # estimated metric depth. The upstream alignment (inv-depth affine +
-            # momentum smoothing) leaves 0.78x–11x residual drift because it
-            # operates in inverse-depth space with a slowly-adapting cache.
-            # This final median-ratio correction in linear depth space fixes it.
-            if self.slam_calibrate and self.slam_output.slam_map is not None:
-                slam_depth = self.slam_output.slam_map.project_map(
-                    frame_idx,
-                    0,
-                    frame.size(),
-                    unpack_optional(frame.intrinsics),
-                    self.infill_target_pose[frame_idx],
-                    unpack_optional(frame.camera_type),
-                    infill=False,
-                )
-                slam_valid = slam_depth > 0
-                if slam_valid.any():
-                    est_at_slam = frame.metric_depth[slam_valid]
-                    est_valid = est_at_slam > 0.01
-                    if est_valid.any():
-                        ratio = torch.median(slam_depth[slam_valid][est_valid] / est_at_slam[est_valid])
-                        frame.metric_depth = frame.metric_depth * ratio
 
             yield frame
 
@@ -346,6 +351,8 @@ class MultiviewDepthProcessor(StreamProcessor):
         window_size: int = 10,                  # Practically this should be as large as possible if memory permits.
         overlap_size: int = 3,
         secondary_keyframe: bool = False,       # This is found to cause jittering for some scenes due to abrupt context changes.
+        slam_calibrate: bool = False,
+        global_smooth_scale: bool = False,
     ):
         super().__init__()
         self.slam_output = slam_output
@@ -353,6 +360,8 @@ class MultiviewDepthProcessor(StreamProcessor):
         self.window_size = window_size
         self.overlap_size = overlap_size
         self.secondary_keyframe = secondary_keyframe
+        self.slam_calibrate = slam_calibrate
+        self.global_smooth_scale = global_smooth_scale
 
         self.keyframes_inds = unpack_optional(self.slam_output.slam_map).dense_disp_frame_inds
         self.keyframes_data: list[VideoFrame] = []
@@ -450,11 +459,40 @@ class MultiviewDepthProcessor(StreamProcessor):
 
                 for sw_idx, frame in enumerate(current_sliding_window[:n_frames_to_yield]):
                     frame.metric_depth = sw_depth[sw_idx]
-                    yield frame
+                    
+                    if self.slam_calibrate and self.slam_output.slam_map is not None:
+                        from vipe.utils.misc import unpack_optional
+                        infill_target_pose = self.slam_output.get_view_trajectory(0)
+                        slam_depth = self.slam_output.slam_map.project_map(
+                            frame.raw_frame_idx,
+                            0,
+                            frame.size(),
+                            unpack_optional(frame.intrinsics),
+                            infill_target_pose[frame.raw_frame_idx],
+                            unpack_optional(frame.camera_type),
+                            infill=False,
+                        )
+                        slam_valid = slam_depth > 0
+                        if slam_valid.any():
+                            est_at_slam = frame.metric_depth[slam_valid]
+                            est_valid = est_at_slam > 0.01
+                            if est_valid.any():
+                                ratio = torch.median(slam_depth[slam_valid][est_valid] / est_at_slam[est_valid])
+                                if self.global_smooth_scale:
+                                    frame.information = f"ratio={ratio.item()}"
+                                else:
+                                    frame.metric_depth = frame.metric_depth * ratio
 
-                trailing_depth = sw_depth[n_frames_to_yield:]
+                    yield frame
+                
+                trailing_depth = sw_depth[n_frames_to_yield:].clone()
                 current_sliding_window = current_sliding_window[n_frames_to_yield:]
                 current_sliding_window_idx = current_sliding_window_idx[n_frames_to_yield:]
+
+                # Cleanup to avoid OOM
+                del sw_depth
+                del dav3_inference_result
+                torch.cuda.empty_cache()
 
         assert len(current_sliding_window) == 0, "Current sliding window should be empty"
 
