@@ -141,6 +141,19 @@ class TrackAnythingProcessor(StreamProcessor):
         return frame
 
 
+class SimpleDepthProcessor(StreamProcessor):
+    def __init__(self, depth_path: str):
+        super().__init__()
+        self.depth_model = make_depth_model(f"external-{depth_path}")
+
+    def update_attributes(self, previous_attributes: set[FrameAttribute]) -> set[FrameAttribute]:
+        return previous_attributes | {FrameAttribute.METRIC_DEPTH}
+
+    def __call__(self, frame_idx: int, frame: VideoFrame) -> VideoFrame:
+        res = self.depth_model.infer(frame.rgb, frame_idx)
+        frame.metric_depth = unpack_optional(res.metric_depth)
+        return frame
+
 class AdaptiveDepthProcessor(StreamProcessor):
     """
     Compute projection of the SLAM map onto the current frames.

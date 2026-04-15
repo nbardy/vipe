@@ -53,7 +53,17 @@ output:
   
   # Depth Edge Pruning (drops depth discontinuity pixels to avoid flying pixels/comet tails)
   tsdf_apply_edge_pruning: true
-  tsdf_edge_pruning_threshold: 0.5
+  # Relative mode thresholds operate on |grad(depth)| / max(depth, eps)
+  tsdf_edge_pruning_relative: true
+  tsdf_edge_pruning_threshold: 0.1
+
+  # Depth truncation for TSDF integration:
+  # if auto mode is enabled, use Tukey fence (Q3 + scale * IQR) per frame
+  tsdf_depth_trunc: 10.0
+  tsdf_auto_depth_trunc: true
+  tsdf_auto_depth_trunc_iqr_scale: 1.5
+  tsdf_auto_depth_trunc_min: 2.0
+  tsdf_auto_depth_trunc_max: 40.0
   
   # Statistical Outlier Removal (cleans up floating noise in the final point cloud)
   tsdf_apply_sor: true

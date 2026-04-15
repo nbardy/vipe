@@ -26,7 +26,7 @@ from vipe.utils.logging import configure_logging
 from vipe.utils.viser import run_viser
 
 
-@click.command()
+@click.command(context_settings=dict(ignore_unknown_options=True, allow_extra_args=True))
 @click.argument("video", type=click.Path(exists=True, path_type=Path), required=False)
 @click.option(
     "--image-dir",
@@ -42,7 +42,8 @@ from vipe.utils.viser import run_viser
 )
 @click.option("--pipeline", "-p", default="default", help="Pipeline configuration to use (default: 'default')")
 @click.option("--visualize", "-v", is_flag=True, help="Enable visualization of intermediate results")
-def infer(video: Path, image_dir: Path, output: Path, pipeline: str, visualize: bool):
+@click.pass_context
+def infer(ctx, video: Path, image_dir: Path, output: Path, pipeline: str, visualize: bool):
     """Run inference on a video file or directory of images."""
 
     logger = configure_logging()
@@ -62,6 +63,9 @@ def infer(video: Path, image_dir: Path, output: Path, pipeline: str, visualize: 
         overrides.append("pipeline.slam.visualize=true")
     else:
         overrides.append("pipeline.output.save_viz=false")
+
+    # Add extra hydra overrides from CLI
+    overrides.extend(ctx.args)
 
     # Set up stream configuration based on input type
     if image_dir:

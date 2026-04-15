@@ -42,5 +42,10 @@ def make_depth_model(model: str):
 
         return DepthAnything3Model()
 
+    elif model_name == "external":
+        from .external import ExternalDepthModel
+
+        return ExternalDepthModel(path=model_sub)
+
     else:
         raise ValueError(f"Unknown depth model: {model}")

@@ -69,7 +69,15 @@ class DefaultAnnotationPipeline(Pipeline):
         assert FrameAttribute.METRIC_DEPTH not in video_stream.attributes()
         assert FrameAttribute.INSTANCE not in video_stream.attributes()
 
-        init_processors.append(GeoCalibIntrinsicsProcessor(video_stream, camera_type=self.camera_type))
+        if self.slam_cfg.get("external_pose") and self.slam_cfg.get("external_intrinsics"):
+            from .external import ExternalPoseIntrinsicsProcessor
+            init_processors.append(ExternalPoseIntrinsicsProcessor(
+                pose_path=self.slam_cfg.external_pose,
+                intrinsics_path=self.slam_cfg.external_intrinsics
+            ))
+        else:
+            init_processors.append(GeoCalibIntrinsicsProcessor(video_stream, camera_type=self.camera_type))
+
         if self.init_cfg.instance is not None:
             init_processors.append(
                 TrackAnythingProcessor(
@@ -94,6 +102,10 @@ class DefaultAnnotationPipeline(Pipeline):
         if (depth_align_model := self.post_cfg.depth_align_model) is not None:
             if depth_align_model.startswith("mvd_"):
                 post_processors.append(MultiviewDepthProcessor(slam_output, model=depth_align_model))
+            elif depth_align_model.startswith("external-"):
+                # External depth model handles the loading
+                from .processors import SimpleDepthProcessor
+                post_processors.append(SimpleDepthProcessor(depth_align_model.replace("external-", "")))
             else:
                 post_processors.append(AdaptiveDepthProcessor(slam_output, view_idx, depth_align_model))
         return ProcessedVideoStream(video_stream, post_processors)
@@ -120,8 +132,22 @@ class DefaultAnnotationPipeline(Pipeline):
             self._add_init_processors(video_stream).cache("process", online=True) for video_stream in video_streams
         ]
 
-        slam_pipeline = SLAMSystem(device=torch.device("cuda"), config=self.slam_cfg)
-        slam_output = slam_pipeline.run(slam_streams, rig=slam_rig, camera_type=self.camera_type)
+        if self.slam_cfg.get("external_pose"):
+            # Mock slam_output for downstream processors
+            class ExternalSLAMOutput:
+                def __init__(self, streams):
+                    # Poses and intrinsics are already in the streams via ExternalPoseIntrinsicsProcessor
+                    self.trajectory = torch.stack([torch.stack([f.pose.data for f in s]) for s in streams])
+                    self.intrinsics = torch.stack([f[0].intrinsics for f in streams])
+                    self.ba_residual = 0.0
+                    self.slam_map = None # Not needed for simple TSDF
+                def get_view_trajectory(self, idx):
+                    return self.trajectory[idx]
+
+            slam_output = ExternalSLAMOutput(slam_streams)
+        else:
+            slam_pipeline = SLAMSystem(device=torch.device("cuda"), config=self.slam_cfg)
+            slam_output = slam_pipeline.run(slam_streams, rig=slam_rig, camera_type=self.camera_type)
 
         if self.return_payload:
             annotate_output.payload = slam_output
@@ -166,6 +192,15 @@ class DefaultAnnotationPipeline(Pipeline):
                         color_type=o3d.pipelines.integration.TSDFVolumeColorType.RGB8
                     )
 
+                    tsdf_depth_trunc_default = float(self.out_cfg.get("tsdf_depth_trunc", 10.0))
+                    tsdf_auto_depth_trunc = bool(self.out_cfg.get("tsdf_auto_depth_trunc", True))
+                    tsdf_auto_depth_trunc_iqr_scale = float(self.out_cfg.get("tsdf_auto_depth_trunc_iqr_scale", 1.5))
+                    tsdf_auto_depth_trunc_min = float(self.out_cfg.get("tsdf_auto_depth_trunc_min", 2.0))
+                    tsdf_auto_depth_trunc_max = float(self.out_cfg.get("tsdf_auto_depth_trunc_max", 40.0))
+                    tsdf_edge_pruning_relative = bool(self.out_cfg.get("tsdf_edge_pruning_relative", True))
+                    tsdf_edge_pruning_threshold = float(self.out_cfg.get("tsdf_edge_pruning_threshold", 0.1))
+                    tsdf_edge_pruning_eps = 1e-3
+
                     for frame_idx, frame_data in enumerate(output_stream):
                         if frame_data.pose is None or frame_data.metric_depth is None or frame_data.intrinsics is None:
                             continue
@@ -189,15 +224,27 @@ class DefaultAnnotationPipeline(Pipeline):
                             grad_x = cv2.Sobel(depth, cv2.CV_64F, 1, 0, ksize=3)
                             grad_y = cv2.Sobel(depth, cv2.CV_64F, 0, 1, ksize=3)
                             grad_mag = np.sqrt(grad_x**2 + grad_y**2)
-                            threshold = self.out_cfg.get("tsdf_edge_pruning_threshold", 0.5)
-                            edge_mask = grad_mag > threshold  
+                            if tsdf_edge_pruning_relative:
+                                grad_metric = grad_mag / np.maximum(np.abs(depth), tsdf_edge_pruning_eps)
+                            else:
+                                grad_metric = grad_mag
+                            edge_mask = (grad_metric > tsdf_edge_pruning_threshold) & (depth > 0.0)
                             depth[edge_mask] = 0.0
                         # --------------------------
+
+                        depth_trunc = tsdf_depth_trunc_default
+                        if tsdf_auto_depth_trunc:
+                            valid_depth = depth[(depth > 0.0) & np.isfinite(depth)]
+                            if valid_depth.size >= 64:
+                                q1, q3 = np.percentile(valid_depth, [25.0, 75.0])
+                                iqr = max(q3 - q1, 1e-6)
+                                depth_trunc = float(q3 + tsdf_auto_depth_trunc_iqr_scale * iqr)
+                                depth_trunc = float(np.clip(depth_trunc, tsdf_auto_depth_trunc_min, tsdf_auto_depth_trunc_max))
 
                         rgb_o3d = o3d.geometry.Image(rgb)
                         depth_o3d = o3d.geometry.Image(depth)
                         rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
-                            rgb_o3d, depth_o3d, depth_scale=1.0, depth_trunc=10.0, convert_rgb_to_intensity=False
+                            rgb_o3d, depth_o3d, depth_scale=1.0, depth_trunc=depth_trunc, convert_rgb_to_intensity=False
                         )
 
                         fx, fy, cx, cy = frame_data.intrinsics.cpu().numpy()
