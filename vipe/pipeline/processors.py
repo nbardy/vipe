@@ -37,6 +37,12 @@ from vipe.utils.morph import erode
 logger = logging.getLogger(__name__)
 
 
+def _as_cpu_float(value) -> float:
+    if isinstance(value, torch.Tensor):
+        return float(value.detach().cpu().item())
+    return float(value)
+
+
 class IntrinsicEstimationProcessor(StreamProcessor):
     """Override existing intrinsics with estimated intrinsics."""
 
@@ -294,6 +300,8 @@ class AdaptiveDepthProcessor(StreamProcessor):
                     scale = raw_scales[-1] if raw_scales else 1.0
                     bias = raw_biases[-1] if raw_biases else 0.0
 
+                scale = _as_cpu_float(scale)
+                bias = _as_cpu_float(bias)
                 raw_scales.append(scale)
                 raw_biases.append(bias)
                 buffered_frames.append((frame_idx, frame, video_depth_inv_depth, prompt_result))

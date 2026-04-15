@@ -101,7 +101,6 @@ class FrameDirStream(VideoStream):
 
         frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         frame_rgb = torch.as_tensor(frame).float() / 255.0
-        frame_rgb = frame_rgb.cuda()
 
         return VideoFrame(raw_frame_idx=self.current_frame_idx, rgb=frame_rgb)
 
@@ -138,4 +137,3 @@ class FrameDirStreamList(StreamList):
 
     def stream_name(self, index: int) -> str:
         return self.frame_directories[index].name
-

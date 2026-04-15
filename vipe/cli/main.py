@@ -91,7 +91,10 @@ def infer(video: Path, image_dir: Path, output: Path, pipeline: str, visualize: 
 
     if image_dir:
         # Use frame directory stream
-        video_stream = ProcessedVideoStream(FrameDirStream(image_dir), []).cache(desc="Reading image frames")
+        video_stream = ProcessedVideoStream(FrameDirStream(image_dir), []).cache(
+            desc="Reading image frames",
+            online=True,
+        )
     else:
         # Some input videos can be malformed, so we need to cache the videos to obtain correct number of frames.
         video_stream = ProcessedVideoStream(RawMp4Stream(video), []).cache(desc="Reading video stream")
